@@ -5,11 +5,13 @@
 .DESCRIPTION
     A PowerShell tool with a Windows Forms GUI that allows you to select
     and install multiple software packages at once using winget.
-.NOTES
-    Author: OneClickInstall
-    Version: 1.0.0
-    Requires: Windows 10/11 with winget installed
+.PARAMETER ConfigFile
+    Optional custom JSON config filename (must be in config folder)
 #>
+
+param(
+    [string]$ConfigFile = ""
+)
 
 # ============================================
 # CONFIGURATION
@@ -17,7 +19,12 @@
 $Script:Version = "1.0.0"
 $Script:AppName = "OneClickInstall"
 $Script:LogFile = Join-Path $PSScriptRoot "install_log_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
-$Script:PackagesFile = Join-Path $PSScriptRoot "configpackages.json"
+
+if ($ConfigFile) {
+    $Script:PackagesFile = Join-Path $PSScriptRoot "config\$ConfigFile"
+} else {
+    $Script:PackagesFile = Join-Path $PSScriptRoot "config\packages.json"
+}
 
 # ============================================
 # HELPER FUNCTIONS
@@ -29,10 +36,10 @@ function Write-Log {
     $logEntry = "[$timestamp] [$Level] $Message"
     Add-Content -Path $Script:LogFile -Value $logEntry
     switch ($Level) {
-        "ERROR" { Write-Host $logEntry -ForegroundColor Red }
-        "WARN"  { Write-Host $logEntry -ForegroundColor Yellow }
+        "ERROR"   { Write-Host $logEntry -ForegroundColor Red }
+        "WARN"    { Write-Host $logEntry -ForegroundColor Yellow }
         "SUCCESS" { Write-Host $logEntry -ForegroundColor Green }
-        default { Write-Host $logEntry -ForegroundColor Cyan }
+        default   { Write-Host $logEntry -ForegroundColor Cyan }
     }
 }
 
@@ -50,16 +57,13 @@ function Test-WingetInstalled {
 function Install-Winget {
     Write-Log "Attempting to install winget..." "WARN"
     try {
-        # Try to install via Add-AppxPackage
         $progressPreference = 'silentlyContinue'
         $latestWinget = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-cli/releases/latest"
         $wingetUrl = $latestWinget.assets | Where-Object { $_.name -match "\.msixbundle$" } | Select-Object -First 1 -ExpandProperty browser_download_url
-        
         $tempFile = Join-Path $env:TEMP "winget.msixbundle"
         Invoke-WebRequest -Uri $wingetUrl -OutFile $tempFile
         Add-AppxPackage -Path $tempFile
         Remove-Item $tempFile -Force
-        
         Write-Log "Winget installed successfully!" "SUCCESS"
         return $true
     } catch {
@@ -73,11 +77,10 @@ function Install-Package {
         [string]$WingetId,
         [string]$Name
     )
-    
     try {
         Write-Log "Installing: $Name ($WingetId)..."
         $process = Start-Process -FilePath "winget" -ArgumentList "install", "--id", $WingetId, "--accept-package-agreements", "--accept-source-agreements", "--silent" -Wait -PassThru -NoNewWindow -RedirectStandardOutput "$env:TEMP\winget_out.txt" -RedirectStandardError "$env:TEMP\winget_err.txt"
-        
+
         if ($process.ExitCode -eq 0) {
             Write-Log "$Name installed successfully!" "SUCCESS"
             return @{ Success = $true; Message = "Installed successfully" }
@@ -111,137 +114,347 @@ function Load-Packages {
 }
 
 # ============================================
-# GUI FUNCTIONS
+# GUI
 # ============================================
 
 function Show-GUI {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
-    # Load packages
     $categories = Load-Packages
     if (-not $categories) {
-        [System.Windows.Forms.MessageBox]::Show("Failed to load package definitions. Please ensure configpackages.json exists.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        [System.Windows.Forms.MessageBox]::Show(
+            "Failed to load package definitions.`nPlease ensure config/packages.json exists at:`n$Script:PackagesFile",
+            "Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
         return
     }
 
-    # ---- THEME COLORS ----
-    $colorBackground = [System.Drawing.Color]::FromArgb(30, 30, 30)
-    $colorPanel = [System.Drawing.Color]::FromArgb(45, 45, 45)
-    $colorAccent = [System.Drawing.Color]::FromArgb(0, 120, 212)
-    $colorAccentHover = [System.Drawing.Color]::FromArgb(0, 150, 255)
-    $colorText = [System.Drawing.Color]::FromArgb(240, 240, 240)
-    $colorTextDim = [System.Drawing.Color]::FromArgb(170, 170, 170)
-    $colorSuccess = [System.Drawing.Color]::FromArgb(76, 175, 80)
-    $colorError = [System.Drawing.Color]::FromArgb(244, 67, 54)
-    $colorCategoryHeader = [System.Drawing.Color]::FromArgb(55, 55, 55)
+    # ---- COLORS ----
+    $colorBg        = [System.Drawing.Color]::FromArgb(30, 30, 30)
+    $colorPanel     = [System.Drawing.Color]::FromArgb(45, 45, 45)
+    $colorAccent    = [System.Drawing.Color]::FromArgb(0, 120, 212)
+    $colorText      = [System.Drawing.Color]::FromArgb(240, 240, 240)
+    $colorTextDim   = [System.Drawing.Color]::FromArgb(170, 170, 170)
+    $colorCatHeader = [System.Drawing.Color]::FromArgb(55, 55, 55)
+    $colorSuccess   = [System.Drawing.Color]::FromArgb(76, 175, 80)
+    $colorError     = [System.Drawing.Color]::FromArgb(244, 67, 54)
 
     # ---- MAIN FORM ----
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = "$Script:AppName v$Script:Version - Bulk Software Installer"
+    $form.Text = "$Script:AppName v$Script:Version"
     $form.Size = New-Object System.Drawing.Size(1000, 750)
     $form.StartPosition = "CenterScreen"
-    $form.BackColor = $colorBackground
+    $form.BackColor = $colorBg
     $form.ForeColor = $colorText
     $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
     $form.FormBorderStyle = "FixedSingle"
     $form.MaximizeBox = $false
-    $form.Icon = [System.Drawing.SystemIcons]::Application
 
-    # ---- HEADER PANEL ----
+    # ---- HEADER ----
     $headerPanel = New-Object System.Windows.Forms.Panel
     $headerPanel.Dock = "Top"
-    $headerPanel.Height = 80
+    $headerPanel.Height = 70
     $headerPanel.BackColor = $colorPanel
 
     $titleLabel = New-Object System.Windows.Forms.Label
-    $titleLabel.Text = "⚡ $Script:AppName"
-    $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 20, [System.Drawing.FontStyle]::Bold)
+    $titleLabel.Text = $Script:AppName
+    $titleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 18, [System.Drawing.FontStyle]::Bold)
     $titleLabel.ForeColor = $colorAccent
     $titleLabel.AutoSize = $true
-    $titleLabel.Location = New-Object System.Drawing.Point(20, 12)
+    $titleLabel.Location = New-Object System.Drawing.Point(20, 10)
     $headerPanel.Controls.Add($titleLabel)
 
     $subtitleLabel = New-Object System.Windows.Forms.Label
-    $subtitleLabel.Text = "Select software to install and click 'Install Selected'. Uses winget package manager."
-    $subtitleLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $subtitleLabel.Text = "Select software to install, then click Install Selected. Powered by winget."
     $subtitleLabel.ForeColor = $colorTextDim
     $subtitleLabel.AutoSize = $true
-    $subtitleLabel.Location = New-Object System.Drawing.Point(22, 52)
+    $subtitleLabel.Location = New-Object System.Drawing.Point(22, 45)
     $headerPanel.Controls.Add($subtitleLabel)
 
     $form.Controls.Add($headerPanel)
 
-    # ---- BUTTON PANEL (TOP) ----
-    $buttonPanel = New-Object System.Windows.Forms.Panel
-    $buttonPanel.Location = New-Object System.Drawing.Point(0, 80)
-    $buttonPanel.Size = New-Object System.Drawing.Size(1000, 50)
-    $buttonPanel.BackColor = $colorBackground
+    # ---- TOOLBAR ----
+    $toolbar = New-Object System.Windows.Forms.Panel
+    $toolbar.Location = New-Object System.Drawing.Point(0, 70)
+    $toolbar.Size = New-Object System.Drawing.Size(1000, 50)
+    $toolbar.BackColor = $colorBg
 
-    # Select All Button
     $btnSelectAll = New-Object System.Windows.Forms.Button
-    $btnSelectAll.Text = "☑ Select All"
-    $btnSelectAll.Size = New-Object System.Drawing.Size(110, 35)
-    $btnSelectAll.Location = New-Object System.Drawing.Point(20, 8)
+    $btnSelectAll.Text = "[+] Select All"
+    $btnSelectAll.Size = New-Object System.Drawing.Size(110, 32)
+    $btnSelectAll.Location = New-Object System.Drawing.Point(20, 9)
     $btnSelectAll.FlatStyle = "Flat"
     $btnSelectAll.BackColor = $colorPanel
     $btnSelectAll.ForeColor = $colorText
     $btnSelectAll.FlatAppearance.BorderColor = $colorAccent
     $btnSelectAll.Cursor = "Hand"
-    $buttonPanel.Controls.Add($btnSelectAll)
+    $toolbar.Controls.Add($btnSelectAll)
 
-    # Deselect All Button
     $btnDeselectAll = New-Object System.Windows.Forms.Button
-    $btnDeselectAll.Text = "☐ Deselect All"
-    $btnDeselectAll.Size = New-Object System.Drawing.Size(120, 35)
-    $btnDeselectAll.Location = New-Object System.Drawing.Point(140, 8)
+    $btnDeselectAll.Text = "[-] Deselect All"
+    $btnDeselectAll.Size = New-Object System.Drawing.Size(120, 32)
+    $btnDeselectAll.Location = New-Object System.Drawing.Point(140, 9)
     $btnDeselectAll.FlatStyle = "Flat"
     $btnDeselectAll.BackColor = $colorPanel
     $btnDeselectAll.ForeColor = $colorText
     $btnDeselectAll.FlatAppearance.BorderColor = $colorAccent
     $btnDeselectAll.Cursor = "Hand"
-    $buttonPanel.Controls.Add($btnDeselectAll)
+    $toolbar.Controls.Add($btnDeselectAll)
 
-    # Search Box
     $searchBox = New-Object System.Windows.Forms.TextBox
-    $searchBox.Size = New-Object System.Drawing.Size(200, 30)
-    $searchBox.Location = New-Object System.Drawing.Point(290, 12)
+    $searchBox.Size = New-Object System.Drawing.Size(200, 28)
+    $searchBox.Location = New-Object System.Drawing.Point(290, 11)
     $searchBox.BackColor = $colorPanel
-    $searchBox.ForeColor = $colorText
+    $searchBox.ForeColor = $colorTextDim
     $searchBox.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $searchBox.Text = "🔍 Search..."
-    $buttonPanel.Controls.Add($searchBox)
+    $searchBox.Text = "Search..."
+    $toolbar.Controls.Add($searchBox)
 
-    # Selected count label
     $lblCount = New-Object System.Windows.Forms.Label
     $lblCount.Text = "Selected: 0"
     $lblCount.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $lblCount.ForeColor = $colorAccent
     $lblCount.AutoSize = $true
-    $lblCount.Location = New-Object System.Drawing.Point(520, 16)
-    $buttonPanel.Controls.Add($lblCount)
+    $lblCount.Location = New-Object System.Drawing.Point(520, 14)
+    $toolbar.Controls.Add($lblCount)
 
-    $form.Controls.Add($buttonPanel)
+    $form.Controls.Add($toolbar)
 
-    # ---- SCROLLABLE PACKAGE PANEL ----
+    # ---- SCROLLABLE PACKAGE LIST ----
     $scrollPanel = New-Object System.Windows.Forms.Panel
-    $scrollPanel.Location = New-Object System.Drawing.Point(10, 135)
+    $scrollPanel.Location = New-Object System.Drawing.Point(10, 125)
     $scrollPanel.Size = New-Object System.Drawing.Size(965, 480)
     $scrollPanel.AutoScroll = $true
-    $scrollPanel.BackColor = $colorBackground
+    $scrollPanel.BackColor = $colorBg
 
-    # Store all checkboxes for reference
     $Script:AllCheckboxes = @()
     $yOffset = 5
 
     foreach ($category in $categories) {
-        # Category Header
-        $catPanel = New-Object System.Windows.Forms.Panel
-        $catPanel.Location = New-Object System.Drawing.Point(5, $yOffset)
-        $catPanel.Size = New-Object System.Drawing.Size(920, 30)
-        $catPanel.BackColor = $colorCategoryHeader
-
+        # Category header
         $catLabel = New-Object System.Windows.Forms.Label
-        $catLabel.Text = "  📁 $($category.name)"
+        $catLabel.Text = "  > $($category.name)"
         $catLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $catLabel.ForeColor = $colorText
+        $catLabel.BackColor = $colorCatHeader
+        $catLabel.Size = New-Object System.Drawing.Size(920, 28)
+        $catLabel.Location = New-Object System.Drawing.Point(5, $yOffset)
+        $catLabel.TextAlign = "MiddleLeft"
+        $scrollPanel.Controls.Add($catLabel)
+        $yOffset += 32
 
+        # Packages in category
+        foreach ($pkg in $category.packages) {
+            $cb = New-Object System.Windows.Forms.CheckBox
+            $cb.Text = "$($pkg.name)  -  $($pkg.description)"
+            $cb.Tag = $pkg.wingetId
+            $cb.Size = New-Object System.Drawing.Size(900, 24)
+            $cb.Location = New-Object System.Drawing.Point(25, $yOffset)
+            $cb.ForeColor = $colorText
+            $cb.BackColor = $colorBg
+            $cb.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+            $cb.Add_CheckedChanged({
+                $count = ($Script:AllCheckboxes | Where-Object { $_.Checked }).Count
+                $lblCount.Text = "Selected: $count"
+            })
+            $scrollPanel.Controls.Add($cb)
+            $Script:AllCheckboxes += $cb
+            $yOffset += 26
+        }
+
+        $yOffset += 10
+    }
+
+    $form.Controls.Add($scrollPanel)
+
+    # ---- BOTTOM PANEL ----
+    $bottomPanel = New-Object System.Windows.Forms.Panel
+    $bottomPanel.Location = New-Object System.Drawing.Point(0, 615)
+    $bottomPanel.Size = New-Object System.Drawing.Size(1000, 100)
+    $bottomPanel.BackColor = $colorPanel
+
+    $progressBar = New-Object System.Windows.Forms.ProgressBar
+    $progressBar.Location = New-Object System.Drawing.Point(20, 10)
+    $progressBar.Size = New-Object System.Drawing.Size(750, 25)
+    $progressBar.Style = "Continuous"
+    $bottomPanel.Controls.Add($progressBar)
+
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = "Ready"
+    $lblStatus.ForeColor = $colorTextDim
+    $lblStatus.AutoSize = $true
+    $lblStatus.Location = New-Object System.Drawing.Point(20, 42)
+    $bottomPanel.Controls.Add($lblStatus)
+
+    $btnInstall = New-Object System.Windows.Forms.Button
+    $btnInstall.Text = "INSTALL SELECTED"
+    $btnInstall.Size = New-Object System.Drawing.Size(180, 50)
+    $btnInstall.Location = New-Object System.Drawing.Point(790, 10)
+    $btnInstall.FlatStyle = "Flat"
+    $btnInstall.BackColor = $colorAccent
+    $btnInstall.ForeColor = $colorText
+    $btnInstall.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $btnInstall.FlatAppearance.BorderSize = 0
+    $btnInstall.Cursor = "Hand"
+    $bottomPanel.Controls.Add($btnInstall)
+
+    $form.Controls.Add($bottomPanel)
+
+    # ---- EVENT HANDLERS ----
+
+    # Select All
+    $btnSelectAll.Add_Click({
+        foreach ($cb in $Script:AllCheckboxes) {
+            if ($cb.Visible) { $cb.Checked = $true }
+        }
+    })
+
+    # Deselect All
+    $btnDeselectAll.Add_Click({
+        foreach ($cb in $Script:AllCheckboxes) {
+            $cb.Checked = $false
+        }
+    })
+
+    # Search focus clear placeholder
+    $searchBox.Add_GotFocus({
+        if ($searchBox.Text -eq "Search...") {
+            $searchBox.Text = ""
+            $searchBox.ForeColor = $colorText
+        }
+    })
+
+    $searchBox.Add_LostFocus({
+        if ($searchBox.Text -eq "") {
+            $searchBox.Text = "Search..."
+            $searchBox.ForeColor = $colorTextDim
+        }
+    })
+
+    # Search filter
+    $searchBox.Add_TextChanged({
+        $query = $searchBox.Text.ToLower()
+        if ($query -eq "search..." -or $query -eq "") {
+            foreach ($cb in $Script:AllCheckboxes) { $cb.Visible = $true }
+            return
+        }
+        foreach ($cb in $Script:AllCheckboxes) {
+            $cb.Visible = $cb.Text.ToLower().Contains($query)
+        }
+    })
+
+    # Install button
+    $btnInstall.Add_Click({
+        $selected = $Script:AllCheckboxes | Where-Object { $_.Checked }
+
+        if ($selected.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show(
+                "No packages selected. Please check at least one item.",
+                "Nothing Selected",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            return
+        }
+
+        $confirm = [System.Windows.Forms.MessageBox]::Show(
+            "Install $($selected.Count) selected package(s)?`n`nThis may take several minutes.",
+            "Confirm Installation",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Question
+        )
+
+        if ($confirm -ne "Yes") { return }
+
+        # Disable UI during install
+        $btnInstall.Enabled = $false
+        $btnSelectAll.Enabled = $false
+        $btnDeselectAll.Enabled = $false
+        $progressBar.Maximum = $selected.Count
+        $progressBar.Value = 0
+
+        $successCount = 0
+        $failCount = 0
+        $results = @()
+
+        foreach ($cb in $selected) {
+            $pkgName = $cb.Text.Split(" - ")[0].Trim()
+            $pkgId = $cb.Tag
+
+            $lblStatus.Text = "Installing: $pkgName ($($progressBar.Value + 1)/$($selected.Count))..."
+            $form.Refresh()
+
+            $result = Install-Package -WingetId $pkgId -Name $pkgName
+
+            if ($result.Success) {
+                $successCount++
+                $cb.ForeColor = $colorSuccess
+                $results += "[OK] $pkgName - $($result.Message)"
+            } else {
+                $failCount++
+                $cb.ForeColor = $colorError
+                $results += "[FAIL] $pkgName - $($result.Message)"
+            }
+
+            $progressBar.Value++
+            $form.Refresh()
+        }
+
+        # Re-enable UI
+        $btnInstall.Enabled = $true
+        $btnSelectAll.Enabled = $true
+        $btnDeselectAll.Enabled = $true
+        $lblStatus.Text = "Done! Success: $successCount | Failed: $failCount"
+        $lblStatus.ForeColor = if ($failCount -eq 0) { $colorSuccess } else { $colorError }
+
+        # Show summary
+        $summary = "Installation Complete!`n`n"
+        $summary += "Successful: $successCount`n"
+        $summary += "Failed: $failCount`n"
+        $summary += "Log: $Script:LogFile`n`n"
+        $summary += ($results -join "`n")
+
+        [System.Windows.Forms.MessageBox]::Show(
+            $summary,
+            "Installation Summary",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            $(if ($failCount -eq 0) { [System.Windows.Forms.MessageBoxIcon]::Information } else { [System.Windows.Forms.MessageBoxIcon]::Warning })
+        )
+    })
+
+    # ---- SHOW FORM ----
+    [void]$form.ShowDialog()
+    $form.Dispose()
+}
+
+# ============================================
+# MAIN ENTRY POINT
+# ============================================
+
+Write-Log "=== $Script:AppName v$Script:Version started ==="
+
+# Check winget
+if (-not (Test-WingetInstalled)) {
+    Write-Log "Winget not found." "WARN"
+    $installWinget = Read-Host "Winget is required but not installed. Attempt to install? (Y/N)"
+    if ($installWinget -eq "Y") {
+        if (-not (Install-Winget)) {
+            Write-Host "ERROR: Could not install winget. Please install manually:" -ForegroundColor Red
+            Write-Host "https://aka.ms/getwinget" -ForegroundColor Yellow
+            pause
+            exit 1
+        }
+    } else {
+        Write-Host "Winget is required. Exiting." -ForegroundColor Red
+        pause
+        exit 1
+    }
+}
+
+# Launch GUI
+Show-GUI
+
+Write-Log "=== $Script:AppName finished ==="
